@@ -2,238 +2,265 @@
 
 ## Overview
 
-During automated testing of the system (API, DB, Integration, UI), several functional and data integrity issues were identified.
-
-Below is a list of confirmed bugs based on failing (xfail) test scenarios.
-
----
-
-## 1. Pagination skips first asset
-
-**Severity:** High
-
-**Title:** First asset (id=1) is missing from first page of pagination
-
-**Steps to reproduce:**
-1. Send request: `GET /assets?page=1&per_page=10`
-2. Extract asset IDs from response
-
-**Expected behavior:**
-- The first page should include the first asset (id=1)
-
-**Actual behavior:**
-- Asset with id=1 is missing from results
-
-**Notes:**
-- Likely off-by-one error in pagination logic
+All bugs below are confirmed by automated tests marked `xfail(strict=True)`.
+Each entry includes the covering test for traceability.
 
 ---
 
-## 2. Pagination total count mismatch
-
-**Severity:** High
-
-**Title:** Pagination `items` count does not match `total`
-
-**Steps to reproduce:**
-1. Send request: `GET /assets?page=1&per_page=100`
-2. Compare `len(items)` with `total`
-
-**Expected behavior:**
-- `len(items) == total` when all results fit on one page
-
-**Actual behavior:**
-- Mismatch between returned items and total count
-
----
-
-## 3. Duplicate findings created on repeated scans
+## BUG-01 · SQL Injection in Search Endpoint
 
 **Severity:** Critical
-
-**Title:** Running identical scans creates duplicate findings
+**Service:** Dashboard API
+**Test:** `test_api_validation.py::TestSearchFindings::test_sql_injection_returns_no_results`
 
 **Steps to reproduce:**
-1. Run scan for asset with vulnerability `[X]`
-2. Run the same scan again
-3. Query findings for the asset
+1. Send `GET /findings/search?q=' OR '1'='1`
 
-**Expected behavior:**
-- Only one finding per `(asset_id, vulnerability_id)`
+**Expected:** Empty results — input treated as literal string.
 
-**Actual behavior:**
-- Multiple duplicate findings are created
+**Actual:** Query returns all findings — SQL is injected directly into query via f-string interpolation.
 
-**Impact:**
-- Data integrity issue
-- Affects reporting and risk calculations
+**Root cause:** Search endpoint builds raw SQL with f-string instead of parameterized queries.
 
 ---
 
-## 4. Dismissed findings still accessible
+## BUG-02 · Duplicate Findings on Repeated Scans
 
-**Severity:** Medium
-
-**Title:** Dismissed finding is still retrievable via API
+**Severity:** Critical
+**Service:** Scanner Service
+**Tests:**
+- `test_integration.py::TestDuplicateFindings::test_running_same_scan_twice_does_not_create_duplicates`
+- `test_integration.py::TestConcurrentScans::test_concurrent_scans_do_not_create_duplicate_findings`
 
 **Steps to reproduce:**
-1. Dismiss a finding via `DELETE /findings/{id}`
-2. Request the same finding via `GET /findings/{id}`
+1. Run `POST /scans` for asset X with vulnerability Y
+2. Run the same scan again (or concurrently from multiple threads)
+3. Query `GET /findings?asset_id=X`
 
-**Expected behavior:**
-- API should return `404 Not Found`
+**Expected:** One finding per `(asset_id, vulnerability_id)`.
 
-**Actual behavior:**
-- Finding is still returned
+**Actual:** Multiple duplicate findings created — no deduplication or locking on insert.
+
+**Impact:** Data integrity failure, inflated risk scores, broken reporting.
 
 ---
 
-## 5. Invalid status transition allowed
+## BUG-03 · Dismissed Finding Still Accessible via GET
+
+**Severity:** High
+**Service:** Dashboard API
+**Test:** `test_api_validation.py::TestGetFinding::test_dismissed_finding_returns_404`
+
+**Steps to reproduce:**
+1. Send `DELETE /findings/{id}` — receives 204
+2. Send `GET /findings/{id}`
+
+**Expected:** 404 Not Found.
+
+**Actual:** 200 OK — dismissed finding is still returned.
+
+---
+
+## BUG-04 · Search Endpoint Returns Dismissed Findings
+
+**Severity:** High
+**Service:** Dashboard API
+**Test:** `test_api_validation.py::TestSearchFindings::test_dismissed_finding_excluded_from_search`
+
+**Steps to reproduce:**
+1. Create a finding with unique notes value
+2. Dismiss it via `DELETE /findings/{id}`
+3. Send `GET /findings/search?q=<unique_notes>`
+
+**Expected:** Empty list — dismissed findings excluded.
+
+**Actual:** Dismissed finding appears in search results.
+
+---
+
+## BUG-05 · Search by Hostname Returns Wrong Results (Broken OR Filter)
+
+**Severity:** High
+**Service:** Dashboard API
+**Test:** `test_api_validation.py::TestSearchFindings::test_search_by_hostname_returns_results`
+
+**Steps to reproduce:**
+1. Send `GET /findings/search?q=prod-web-01`
+
+**Expected:** Only findings whose asset hostname is `prod-web-01`.
+
+**Actual:** Returns findings across all hostnames — search uses OR across all fields, not hostname-scoped.
+
+---
+
+## BUG-06 · Scanner Pagination Skips First Asset
+
+**Severity:** High
+**Service:** Scanner Service
+**Test:** `test_integration.py::TestAssetPagination::test_first_page_includes_first_asset`
+
+**Steps to reproduce:**
+1. Send `GET /assets?page=1&per_page=10`
+2. Check if asset with id=1 (`prod-web-01`) is in results
+
+**Expected:** First asset appears on page 1.
+
+**Actual:** Asset id=1 is missing — off-by-one in pagination offset.
+
+---
+
+## BUG-07 · Scanner Pagination Total Count Mismatch
+
+**Severity:** High
+**Service:** Scanner Service
+**Test:** `test_integration.py::TestAssetPagination::test_items_count_matches_total_on_single_page`
+
+**Steps to reproduce:**
+1. Send `GET /assets?page=1&per_page=100`
+2. Compare `len(items)` with `total`
+
+**Expected:** `len(items) == total` when all results fit on one page.
+
+**Actual:** `items` count does not match `total` field.
+
+---
+
+## BUG-08 · Scanner Field Has No Length Validation
+
+**Severity:** High
+**Service:** Dashboard API
+**Test:** `test_api_validation.py::TestCreateFinding::test_create_scanner_over_max_length_returns_422`
+
+**Steps to reproduce:**
+1. Send `POST /findings` with `scanner` value of 101+ characters
+
+**Expected:** 422 Unprocessable Entity with validation error.
+
+**Actual:** Request passes Pydantic validation and hits the DB `String(100)` column limit — may cause 500 Internal Server Error.
+
+---
+
+## BUG-09 · Assets Table Empty on Dashboard UI
+
+**Severity:** High
+**Service:** Dashboard UI
+**Test:** `test_ui_smoke.py::TestAssetsTable::test_assets_table_has_rows`
+
+**Steps to reproduce:**
+1. Open `http://localhost:8000/`
+2. Scroll to the Assets section
+
+**Expected:** Assets table populated from Scanner API.
+
+**Actual:** `<tbody id="assets-table">` is always empty — UI never loads asset data.
+
+---
+
+## BUG-10 · Invalid Status Transition Not Rejected
 
 **Severity:** Medium
-
-**Title:** Invalid status transition (resolved → open) is not rejected
+**Service:** Dashboard API
+**Test:** `test_api_validation.py::TestUpdateFindingStatus::test_status_transition_resolved_to_open_rejected`
 
 **Steps to reproduce:**
 1. Set finding status to `resolved`
-2. Attempt to change status back to `open`
+2. Send `PUT /findings/{id}/status` with `{"status": "open"}`
 
-**Expected behavior:**
-- API should reject invalid transition
+**Expected:** 400 or 422 — backward transition should be rejected.
 
-**Actual behavior:**
-- Transition is allowed or not properly validated
+**Actual:** Transition accepted — no state machine validation.
 
 ---
 
-## 6. Search by hostname does not work
-
-**Severity:** High
-
-**Title:** Search endpoint does not return results for valid hostname
-
-**Steps to reproduce:**
-1. Send request: `GET /findings/search?q=<existing_hostname>`
-
-**Expected behavior:**
-- Findings related to hostname should be returned
-
-**Actual behavior:**
-- Empty result set returned
-
----
-
-## 7. Potential SQL injection vulnerability in search
-
-**Severity:** Critical
-
-**Title:** Search endpoint may be vulnerable to SQL injection
-
-**Steps to reproduce:**
-1. Send request with payload:
-   `GET /findings/search?q=' OR 1=1 --`
-
-**Expected behavior:**
-- Query should be safely handled (no results or sanitized input)
-
-**Actual behavior:**
-- Unexpected behavior (test indicates vulnerability)
-
-**Notes:**
-- Requires deeper security validation
-- Likely missing parameterized queries
-
----
-
-## 8. Risk score rounding is incorrect
+## BUG-11 · Search Does Not Filter by asset_id=0
 
 **Severity:** Low
-
-**Title:** Risk score is not properly rounded
+**Service:** Dashboard API
+**Test:** `test_api_validation.py::TestListFindings::test_filter_by_asset_id_returns_empty_for_unknown[0]`
 
 **Steps to reproduce:**
-1. Call `GET /stats/risk-score`
-2. Inspect returned value
+1. Send `GET /findings?asset_id=0`
 
-**Expected behavior:**
-- Value should be rounded consistently (e.g., 2 decimal places)
+**Expected:** Empty list — no asset with id=0 exists.
 
-**Actual behavior:**
-- Rounding inconsistency detected
+**Actual:** Returns all findings — `asset_id=0` filter is ignored by the service.
 
 ---
 
-## 9. CVSS score constraint not enforced
+## BUG-12 · Status Badge Not Updated After UI Status Change
 
-**Severity:** High
-
-**Title:** Database allows CVSS score outside valid range
+**Severity:** Low
+**Service:** Dashboard UI
+**Test:** `test_ui_smoke.py::TestStatusChangeFlow::test_status_badge_updates_in_table_after_change`
 
 **Steps to reproduce:**
-1. Insert vulnerability with CVSS score outside [0, 10]
+1. Open `http://localhost:8000/`
+2. Change a finding's status via the dropdown
+3. Observe the status badge in the same row
 
-**Expected behavior:**
-- DB constraint should reject invalid values
+**Expected:** Badge text updates to reflect the new status.
 
-**Actual behavior:**
-- Invalid values accepted
+**Actual:** Badge retains the old status text — UI does not re-render the `<span class="status">` after the API call succeeds.
 
 ---
 
-## 10. Invalid finding status accepted in DB
+## 📌 Out of Scope — Found in Source Code Review
 
-**Severity:** High
+The following issue was identified by reviewing application source code directly.
+It falls outside the explicit task requirements (Part 1 focused on Findings CRUD, error handling, and search),
+but is documented here for completeness.
 
-**Title:** Database allows invalid finding status values
+### Risk Score Float Precision (`GET /stats/risk-score`)
 
-**Steps to reproduce:**
-1. Insert finding with arbitrary status string
+**Severity:** Low
+**Service:** Dashboard API
+**Source:** `services/dashboard-api/app/routes/stats.py:35` — `# BUG #5`
 
-**Expected behavior:**
-- Only predefined enum values allowed
+**Description:** The risk score calculation accumulates CVSS scores using Python `float` instead of `Decimal`,
+and returns an unrounded result. This can produce values like `7.333333333333334` instead of `7.33`.
 
-**Actual behavior:**
-- Arbitrary values accepted
+**Expected:** Risk score and average CVSS values rounded to a consistent precision (e.g. 2 decimal places).
+
+**Actual:** Raw floating point result returned — no rounding applied.
+
+**Note:** `GET /stats/risk-score` is listed in the API Reference but testing it was not an explicit task requirement.
+No automated test covers this endpoint in the current suite.
 
 ---
 
-## 11. Invalid vulnerability severity accepted
+## ⚠ Risks — Missing Database-Level Constraints
 
-**Severity:** Medium
+The following are not confirmed bugs in the current data, but represent **architectural risks**.
+The application enforces these rules at the API layer only. A direct database write (migration script,
+admin tool, or compromised connection) would bypass all validation silently.
 
-**Title:** Database allows arbitrary severity values
+Current data is clean — the tests in `TestDataIntegrity` pass — but no DB-level constraint prevents future corruption.
 
-**Steps to reproduce:**
-1. Insert vulnerability with invalid severity
+| Risk | Table | Column | Missing Constraint | Impact if violated |
+|------|-------|--------|--------------------|--------------------|
+| RISK-01 | `vulnerabilities` | `cvss_score` | `CHECK (cvss_score >= 0 AND cvss_score <= 10)` | Invalid scores accepted, risk calculations corrupted |
+| RISK-02 | `findings` | `status` | `CHECK (status IN ('open', 'confirmed', 'in_progress', 'resolved', 'false_positive'))` | Arbitrary strings stored, filters and reports break |
+| RISK-03 | `vulnerabilities` | `severity` | `CHECK (severity IN ('critical', 'high', 'medium', 'low'))` | Arbitrary strings stored, severity filters break |
 
-**Expected behavior:**
-- Only valid severity values allowed
-
-**Actual behavior:**
-- Any string is accepted
+**Recommendation:** Add `CHECK` constraints (or PostgreSQL `ENUM` types) at the DB schema level so data integrity is enforced independently of the application.
 
 ---
 
 ## Summary
 
-| Severity   | Count |
-|------------|------|
-| Critical   | 2    |
-| High       | 5    |
-| Medium     | 3    |
-| Low        | 1    |
+| ID     | Severity | Service        | Title                                            |
+|--------|----------|----------------|--------------------------------------------------|
+| BUG-01 | Critical | Dashboard API | SQL injection in search endpoint |
+| BUG-02 | Critical | Scanner Service | Duplicate findings on repeated/concurrent scans |
+| BUG-03 | High | Dashboard API | Dismissed finding accessible via GET |
+| BUG-04 | High | Dashboard API | Search returns dismissed findings |
+| BUG-05 | High | Dashboard API | Search by hostname returns wrong results |
+| BUG-06 | High | Scanner Service | Pagination skips first asset |
+| BUG-07 | High | Scanner Service | Pagination total count mismatch |
+| BUG-08 | High | Dashboard API | Scanner field has no length validation |
+| BUG-09 | High | Dashboard UI | Assets table empty on dashboard |
+| BUG-10 | Medium | Dashboard API | Invalid status transition not rejected |
+| BUG-11 | Low | Dashboard API | asset_id=0 filter ignored |
+| BUG-12 | Low | Dashboard UI | Status badge not updated after UI change |
 
----
-
-## Conclusion
-
-The system demonstrates multiple issues across:
-- Pagination logic
-- Data integrity
-- Business logic validation
-- Security (potential SQL injection)
-
-These issues should be prioritized before production use, especially:
-- Duplicate findings
-- SQL injection risk
-- Missing DB constraints
+**Total: 12 bugs — 2 Critical · 7 High · 1 Medium · 2 Low**

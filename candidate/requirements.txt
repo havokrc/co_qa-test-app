@@ -3,3 +3,4 @@ requests==2.31.0
 psycopg2-binary==2.9.9
 playwright==1.40.0
 pytest-playwright==0.4.3
+jsonschema==4.26.0

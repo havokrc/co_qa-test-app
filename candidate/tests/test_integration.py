@@ -1,12 +1,14 @@
 import pytest
 import threading
+import uuid
 from clients.dashboard_client import DashboardClient
 from clients.scanner_client import ScannerClient
+from services.finding_actions import FindingActions
 
 
 class TestScanCreatesFindings:
     def test_scan_creates_findings_visible_in_dashboard(
-        self, scanner_cl: ScannerClient, api_cl: DashboardClient, created_asset
+        self, scanner_api_cl: ScannerClient, dashboard_api_cl: DashboardClient, created_asset, valid_vulnerability_ids
     ):
         """Title: Scan creates findings visible via Dashboard API.
 
@@ -18,46 +20,46 @@ class TestScanCreatesFindings:
         5. Assert created vulnerability IDs are present in findings list.
         """
         asset_id = created_asset["id"]
-        vuln_ids = [1, 2]
+        vuln_ids = valid_vulnerability_ids[:2]
 
-        scan_resp = scanner_cl.create_scan(asset_id, "pytest-scanner", vuln_ids)
+        scan_resp = scanner_api_cl.create_scan(asset_id, "pytest-scanner", vuln_ids)
         assert scan_resp.status_code == 201
         scan = scan_resp.json()
         assert scan["status"] == "completed"
         assert scan["findings_count"] == len(vuln_ids)
 
         # Verify findings appear in Dashboard API filtered by asset
-        findings_resp = api_cl.list_findings(asset_id=asset_id)
+        findings_resp = dashboard_api_cl.list_findings(asset_id=asset_id)
         assert findings_resp.status_code == 200
         created_ids = {f["vulnerability_id"] for f in findings_resp.json()["items"]}
         assert set(vuln_ids).issubset(created_ids)
 
-    def test_scan_with_invalid_asset_returns_400(self, scanner_cl: ScannerClient):
+    def test_scan_with_invalid_asset_returns_400(self, scanner_api_cl: ScannerClient):
         """Title: Scan request with invalid asset returns 400.
 
         Steps:
         1. Attempt to create a scan using a non-existent asset_id.
         2. Assert API returns HTTP 400.
         """
-        resp = scanner_cl.create_scan(999999, "pytest-scanner", [1])
+        resp = scanner_api_cl.create_scan(999999, "pytest-scanner", [1])
         assert resp.status_code == 400
 
     def test_scan_skips_invalid_vulnerability_ids(
-        self, scanner_cl: ScannerClient, created_asset
+        self, scanner_api_cl: ScannerClient, created_asset
     ):
         """Title: Scan skips invalid vulnerability IDs.
 
-            Steps:
-            1. Run a scan with a valid asset but non-existent vulnerability IDs.
-            2. Assert API returns 201.
-            3. Assert findings_count equals 0.
-            """
-        resp = scanner_cl.create_scan(created_asset["id"], "pytest-scanner", [999999])
+        Steps:
+        1. Run a scan with a valid asset but non-existent vulnerability IDs.
+        2. Assert API returns 201.
+        3. Assert findings_count equals 0.
+        """
+        resp = scanner_api_cl.create_scan(created_asset["id"], "pytest-scanner", [999999])
         assert resp.status_code == 201
         assert resp.json()["findings_count"] == 0
 
     def test_scan_findings_count_matches_actual_findings_created(
-        self, scanner_cl: ScannerClient, api_cl: DashboardClient, created_asset
+        self, scanner_api_cl: ScannerClient, dashboard_api_cl: DashboardClient, created_asset, valid_vulnerability_ids
     ):
         """Title: Scan findings_count matches actual findings in Dashboard.
 
@@ -68,12 +70,12 @@ class TestScanCreatesFindings:
         4. Assert reported count equals actual findings total.
         """
         asset_id = created_asset["id"]
-        vuln_ids = [3, 4, 5]
+        vuln_ids = valid_vulnerability_ids[:3]
 
-        scan = scanner_cl.create_scan(asset_id, "pytest-scanner", vuln_ids).json()
+        scan = scanner_api_cl.create_scan(asset_id, "pytest-scanner", vuln_ids).json()
         reported_count = scan["findings_count"]
 
-        actual_count = api_cl.list_findings(asset_id=asset_id).json()["total"]
+        actual_count = dashboard_api_cl.list_findings(asset_id=asset_id).json()["total"]
         assert reported_count == actual_count == len(vuln_ids)
 
 
@@ -82,7 +84,7 @@ class TestAssetPagination:
         strict=True,
         reason="Scanner Service pagination skips the first asset — id=1 (prod-web-01) never appears on page 1",
     )
-    def test_first_page_includes_first_asset(self, scanner_cl: ScannerClient):
+    def test_first_page_includes_first_asset(self, scanner_api_cl: ScannerClient):
         """Title: First page should include the first asset.
 
             Steps:
@@ -90,7 +92,7 @@ class TestAssetPagination:
             2. Extract asset IDs from response.
             3. Assert asset with id=1 is present in results.
             """
-        resp = scanner_cl.list_assets(page=1, per_page=10)
+        resp = scanner_api_cl.list_assets(page=1, per_page=10)
         assert resp.status_code == 200
         body = resp.json()
         ids = [a["id"] for a in body["items"]]
@@ -102,7 +104,7 @@ class TestAssetPagination:
         strict=True,
         reason="Scanner Service pagination off-by-one: items count does not match reported total",
     )
-    def test_items_count_matches_total_on_single_page(self, scanner_cl: ScannerClient):
+    def test_items_count_matches_total_on_single_page(self, scanner_api_cl: ScannerClient):
         """Title: Items count matches total when all assets fit on one page.
 
         Steps:
@@ -110,13 +112,13 @@ class TestAssetPagination:
         2. Compare length of items with total field.
         3. Assert both values are equal.
         """
-        resp = scanner_cl.list_assets(page=1, per_page=100)
+        resp = scanner_api_cl.list_assets(page=1, per_page=100)
         body = resp.json()
         assert len(body["items"]) == body["total"], (
             f"total={body['total']} but got {len(body['items'])} items"
         )
 
-    def test_hostname_present_in_listed_assets(self, scanner_cl: ScannerClient):
+    def test_hostname_present_in_listed_assets(self, scanner_api_cl: ScannerClient):
         """Title: Known hostnames appear in asset list.
 
         Steps:
@@ -124,7 +126,7 @@ class TestAssetPagination:
         2. Extract hostnames from response.
         3. Assert at least one known hostname is present.
         """
-        body = scanner_cl.list_assets(page=1, per_page=10).json()
+        body = scanner_api_cl.list_assets(page=1, per_page=10).json()
         hostnames = {a["hostname"] for a in body["items"]}
         assert "prod-web-01" in hostnames or "prod-web-02" in hostnames
 
@@ -135,7 +137,7 @@ class TestDuplicateFindings:
         reason="Scanner Service creates duplicate findings when the same scan is submitted twice for the same asset+vulnerability",
     )
     def test_running_same_scan_twice_does_not_create_duplicates(
-        self, scanner_cl: ScannerClient, api_cl: DashboardClient, created_asset
+        self, scanner_api_cl: ScannerClient, dashboard_api_cl: DashboardClient, created_asset, valid_vulnerability_ids
     ):
         """Title: Running identical scans should not create duplicate findings.
 
@@ -147,12 +149,12 @@ class TestDuplicateFindings:
         5. Assert only one finding exists.
         """
         asset_id = created_asset["id"]
-        vuln_ids = [1]
+        vuln_ids = valid_vulnerability_ids[:1]
 
-        scanner_cl.create_scan(asset_id, "pytest-scanner", vuln_ids)
-        scanner_cl.create_scan(asset_id, "pytest-scanner", vuln_ids)
+        scanner_api_cl.create_scan(asset_id, "pytest-scanner", vuln_ids)
+        scanner_api_cl.create_scan(asset_id, "pytest-scanner", vuln_ids)
 
-        findings = api_cl.list_findings(asset_id=asset_id).json()["items"]
+        findings = dashboard_api_cl.list_findings(asset_id=asset_id).json()["items"]
         dupes = [
             f for f in findings
             if f["vulnerability_id"] == vuln_ids[0]
@@ -165,17 +167,17 @@ class TestDuplicateFindings:
 
 class TestStatusUpdateCrossService:
     def test_status_update_reflected_in_db(
-        self, api_cl: DashboardClient, created_finding, db
+        self, finding_actions: FindingActions, created_finding, db
     ):
         """Title: Status update via API is reflected in database.
 
         Steps:
-        1. Update finding status via Dashboard API.
-        2. Query database for the same finding.
-        3. Assert status and notes match API input.
+        1. Send PUT /findings/{id}/status with status='in_progress' and notes.
+        2. Check the database for that finding's status and notes.
+        3. Assert both values match the submitted input.
         """
         finding_id = created_finding["id"]
-        api_cl.update_finding_status_by_id(finding_id, "in_progress", notes="cross-service check")
+        finding_actions.update_status(finding_id, "in_progress", notes="cross-service check")
 
         db.execute("SELECT status, notes FROM findings WHERE id = %s", (finding_id,))
         row = db.fetchone()
@@ -183,7 +185,7 @@ class TestStatusUpdateCrossService:
         assert row["notes"] == "cross-service check"
 
     def test_scan_then_update_status_then_verify_db(
-        self, scanner_cl: ScannerClient, api_cl: DashboardClient, created_asset, db
+        self, scanner_api_cl: ScannerClient, dashboard_api_cl: DashboardClient, finding_actions: FindingActions, created_asset, valid_vulnerability_ids, db
     ):
         """Title: Scan followed by status update is persisted in DB.
 
@@ -195,28 +197,76 @@ class TestStatusUpdateCrossService:
         5. Assert status is updated.
         """
         asset_id = created_asset["id"]
-        scanner_cl.create_scan(asset_id, "pytest-scanner", [6])
+        scanner_api_cl.create_scan(asset_id, "pytest-scanner", valid_vulnerability_ids[-1:])
 
-        findings = api_cl.list_findings(asset_id=asset_id).json()["items"]
+        findings = dashboard_api_cl.list_findings(asset_id=asset_id).json()["items"]
         assert len(findings) >= 1
         finding_id = findings[0]["id"]
 
-        api_cl.update_finding_status_by_id(finding_id, "confirmed")
+        finding_actions.update_status(finding_id, "confirmed")
 
         db.execute("SELECT status FROM findings WHERE id = %s", (finding_id,))
         assert db.fetchone()["status"] == "confirmed"
 
-#TODO: Add concurrency by Threading
-# class TestConcurrentScans:
-#     def test_concurrent_scans_do_not_create_duplicate_findings(
-#         self, scanner_cl: ScannerClient, api_cl: DashboardClient, created_asset
-#     ):
-#         """Title: Concurrent scans for the same asset+vulnerability produce exactly one finding.
-#
-#         Steps:
-#         1. Create a temporary asset via fixture.
-#         2. Submit 3 identical scans concurrently using threads.
-#         3. Collect all HTTP responses and assert each returned 201.
-#         4. Query the Dashboard API for findings on that asset.
-#         5. Assert exactly one finding exists for the target vulnerability.
-#         """
+
+class TestConcurrentScans:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Scanner Service creates duplicate findings under concurrent load — no deduplication or locking",
+    )
+    def test_concurrent_scans_do_not_create_duplicate_findings(
+        self, scanner_api_cl: ScannerClient, dashboard_api_cl: DashboardClient, created_asset, valid_vulnerability_ids, db
+    ):
+        """Title: Concurrent scans for the same asset+vulnerability produce exactly one finding.
+
+        Steps:
+        1. Use a pre-created asset and a known vulnerability ID.
+        2. Submit 3 identical scans concurrently using threads.
+        3. Collect all HTTP responses and assert each returned 201.
+        4. Query the Dashboard API for findings on that asset.
+        5. Assert exactly one finding exists for the target vulnerability via API.
+        6. Check the database directly: assert COUNT(*) of findings for that asset+vulnerability equals 1.
+        """
+        asset_id = created_asset["id"]
+        vuln_ids = valid_vulnerability_ids[:1]
+        responses = []
+        errors = []
+
+        scanner_name = f"pytest-concurrent-{uuid.uuid4().hex}"
+        def run_scan():
+            try:
+                client = ScannerClient()
+                resp = client.create_scan(asset_id, scanner_name, vuln_ids)
+                responses.append(resp)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=run_scan) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Threads raised exceptions: {errors}"
+        assert len(responses) == 3, f"Expected 3 responses, got {len(responses)}"
+        # Expected 201 or 409 (depends on requirements)
+        assert all(r.status_code == 201 for r in responses), (
+            f"Not all scans returned 201: {[r.status_code for r in responses]}"
+        )
+
+        findings = dashboard_api_cl.list_findings(asset_id=asset_id, per_page=100).json()["items"]
+        dupes = [f for f in findings if f["vulnerability_id"] == vuln_ids[0]]
+        assert len(dupes) == 1, (
+            f"Expected 1 finding for vuln {vuln_ids[0]} on asset {asset_id}, "
+            f"got {len(dupes)} duplicates under concurrent load"
+        )
+
+        db.execute(
+            "SELECT COUNT(*) as cnt FROM findings WHERE asset_id = %s AND vulnerability_id = %s",
+            (asset_id, vuln_ids[0]),
+        )
+        row = db.fetchone()
+        assert row["cnt"] == 1, (
+            f"Expected 1 row in DB for asset {asset_id} + vuln {vuln_ids[0]}, "
+            f"got {row['cnt']}"
+        )
