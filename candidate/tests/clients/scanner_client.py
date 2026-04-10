@@ -1,11 +1,10 @@
 """HTTP client for the Scanner Service (port 8001)."""
-from clients.base_client import BaseClient
+from config.settings import SCANNER_URL
+from clients.http_base_client import HttpBaseClient
 
-BASE_URL = "http://localhost:8001"
 
-
-class ScannerClient(BaseClient):
-    def __init__(self, base_url: str = BASE_URL):
+class ScannerClient(HttpBaseClient):
+    def __init__(self, base_url: str = SCANNER_URL):
         super().__init__(base_url)
 
     # --- Assets ---
@@ -16,17 +15,7 @@ class ScannerClient(BaseClient):
     def get_asset_by_id(self, asset_id: int):
         return self.get(f"/assets/{asset_id}")
 
-    def create_asset(self, hostname: str, asset_type: str, environment: str,
-                     ip_address: str = None, os: str = None):
-        payload = {
-            "hostname": hostname,
-            "asset_type": asset_type,
-            "environment": environment,
-        }
-        if ip_address:
-            payload["ip_address"] = ip_address
-        if os:
-            payload["os"] = os
+    def create_asset(self, payload: dict):
         return self.post("/assets", payload)
 
     def update_asset_by_id(self, asset_id: int, **fields):
